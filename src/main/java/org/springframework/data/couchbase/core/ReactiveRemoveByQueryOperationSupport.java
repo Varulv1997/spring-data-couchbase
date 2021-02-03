@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2020 the original author or authors
+ * Copyright 2012-2021 the original author or authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,11 @@ import reactor.core.publisher.Mono;
 
 import java.util.Optional;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.couchbase.core.query.Query;
+import org.springframework.data.couchbase.core.support.PseudoArgs;
 import org.springframework.data.couchbase.core.support.TemplateUtils;
-import org.springframework.util.Assert;
 
 import com.couchbase.client.java.query.QueryOptions;
 import com.couchbase.client.java.query.QueryScanConsistency;
@@ -34,13 +36,16 @@ public class ReactiveRemoveByQueryOperationSupport implements ReactiveRemoveByQu
 
 	private final ReactiveCouchbaseTemplate template;
 
+	private static final Logger LOG = LoggerFactory.getLogger(ReactiveRemoveByQueryOperationSupport.class);
+
 	public ReactiveRemoveByQueryOperationSupport(final ReactiveCouchbaseTemplate template) {
 		this.template = template;
 	}
 
 	@Override
 	public <T> ReactiveRemoveByQuery<T> removeByQuery(Class<T> domainType) {
-		return new ReactiveRemoveByQuerySupport<>(template, domainType, ALL_QUERY, QueryScanConsistency.NOT_BOUNDED, null);
+		return new ReactiveRemoveByQuerySupport<>(template, domainType, ALL_QUERY, QueryScanConsistency.NOT_BOUNDED, null,
+				null, null);
 	}
 
 	static class ReactiveRemoveByQuerySupport<T> implements ReactiveRemoveByQuery<T> {
@@ -49,24 +54,32 @@ public class ReactiveRemoveByQueryOperationSupport implements ReactiveRemoveByQu
 		private final Class<T> domainType;
 		private final Query query;
 		private final QueryScanConsistency scanConsistency;
+		private final String scope;
 		private final String collection;
+		private final QueryOptions options;
 
 		ReactiveRemoveByQuerySupport(final ReactiveCouchbaseTemplate template, final Class<T> domainType, final Query query,
-				final QueryScanConsistency scanConsistency, String collection) {
+				final QueryScanConsistency scanConsistency, String scope, String collection, QueryOptions options) {
 			this.template = template;
 			this.domainType = domainType;
 			this.query = query;
 			this.scanConsistency = scanConsistency;
+			this.scope = scope;
 			this.collection = collection;
+			this.options = options;
 		}
 
 		@Override
 		public Flux<RemoveResult> all() {
 			return Flux.defer(() -> {
-				String statement = assembleDeleteQuery();
-				Mono<ReactiveQueryResult> allResult = this.collection == null
-						? template.getCouchbaseClientFactory().getCluster().reactive().query(statement, buildQueryOptions())
-						: template.getCouchbaseClientFactory().getScope().reactive().query(statement, buildQueryOptions());
+				PseudoArgs<QueryOptions> pArgs = new PseudoArgs<>(template, scope, collection, options);
+				String statement = assembleDeleteQuery(pArgs.getCollection());
+				LOG.debug("statement: {}", statement);
+				Mono<ReactiveQueryResult> allResult = pArgs.getCollection() == null
+						? template.getCouchbaseClientFactory().getCluster().reactive().query(statement,
+								buildQueryOptions(pArgs.getOptions()))
+						: template.getCouchbaseClientFactory().withScope(pArgs.getScope()).getScope().reactive().query(statement,
+								buildQueryOptions(pArgs.getOptions()));
 				return allResult.onErrorMap(throwable -> {
 					if (throwable instanceof RuntimeException) {
 						return template.potentiallyConvertRuntimeException((RuntimeException) throwable);
@@ -79,8 +92,8 @@ public class ReactiveRemoveByQueryOperationSupport implements ReactiveRemoveByQu
 			});
 		}
 
-		private QueryOptions buildQueryOptions() {
-			final QueryOptions options = QueryOptions.queryOptions();
+		private QueryOptions buildQueryOptions(QueryOptions options) {
+			options = options != null ? options : QueryOptions.queryOptions();
 			if (scanConsistency != null) {
 				options.scanConsistency(scanConsistency);
 			}
@@ -89,30 +102,44 @@ public class ReactiveRemoveByQueryOperationSupport implements ReactiveRemoveByQu
 
 		@Override
 		public TerminatingRemoveByQuery<T> matching(final Query query) {
-			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, collection);
+			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, scope, collection,
+					options);
 		}
 
 		@Override
 		public RemoveByQueryWithConsistency<T> inCollection(final String collection) {
-			Assert.hasText(collection, "Collection must not be null nor empty.");
-			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, collection);
+			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, scope, collection,
+					options);
 		}
 
 		@Override
 		@Deprecated
-		public RemoveByQueryInCollection<T> consistentWith(final QueryScanConsistency scanConsistency) {
-			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, collection);
+		public RemoveByQueryInScope<T> consistentWith(final QueryScanConsistency scanConsistency) {
+			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, scope, collection,
+					options);
 		}
 
 		@Override
 		public RemoveByQueryConsistentWith<T> withConsistency(final QueryScanConsistency scanConsistency) {
-			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, collection);
+			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, scope, collection,
+					options);
 		}
 
-		private String assembleDeleteQuery() {
+		private String assembleDeleteQuery(String collection) {
 			return query.toN1qlRemoveString(template, collection, this.domainType);
 		}
 
+		@Override
+		public RemoveByQueryWithQuery<T> withOptions(QueryOptions options) {
+			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, scope, collection,
+					options);
+		}
+
+		@Override
+		public RemoveByQueryInCollection<T> inScope(String scope) {
+			return new ReactiveRemoveByQuerySupport<>(template, domainType, query, scanConsistency, scope, collection,
+					options);
+		}
 	}
 
 }
